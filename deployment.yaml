@@ -14,7 +14,7 @@ spec:
         app: helloworld
     spec:
       imagePullSecrets:
-        - name: myregistry
+        - name: harbor-registry-secret
       containers:
       - name: helloworld
         image: $REGISTRY_URL/library/helloworld:$TAG_NAME
