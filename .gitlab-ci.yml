@@ -81,7 +81,6 @@ deploy_k8s_job:
       kind: Deployment
       metadata:
         name: helloworld
-        namespace: default
       spec:
         replicas: 1
         selector:
@@ -134,7 +133,6 @@ deploy_k8s_job:
       kind: Service
       metadata:
         name: helloworld
-        namespace: default
       spec:
         ports:
         - port: 80
