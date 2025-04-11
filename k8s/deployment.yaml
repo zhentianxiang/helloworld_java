@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: helloworld
+  namespace: k8s-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      k8s-app: helloworld
+  template:
+    metadata:
+      labels:
+        k8s-app: helloworld
+        logging: "true"
+    spec:
+      imagePullSecrets:
+        - name: harbor-registry-secret
+      containers:
+        - name: helloworld
+          image: harbor.linuxtian.com/k8s-app/helloworld:TAG_NAME
+          imagePullPolicy: Always
+          env:
+            - name: JAVA_OPTS
+              value: "-Xms512m -Xmx2048m -Xmn256m -XX:+UseG1GC -Dspring.profiles.active=deploy_env"
+            - name: LANG
+              value: "zh_CN.UTF-8"
+            - name: TZ
+              value: "Asia/Shanghai"  # 设置时区，避免日志时间错乱
+          ports:
+            - containerPort: 8080
+          resources:
+            limits:
+              cpu: '0.5'
+              memory: 1Gi
+            requests:
+              cpu: '0.5'
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+              scheme: HTTP
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3  # 3次失败后重启
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+              scheme: HTTP
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 3  # 3次失败后将容器标记为不健康
+            timeoutSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: helloworld
+  namespace: default
+spec:
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: helloworld
+  selector:
+    k8s-app: helloworld
+  type: NodePort

@@ -1,0 +1,118 @@
+stages:
+  - package
+  - docker_build
+  - deploy_k8s
+
+variables:
+  MAVEN_OPTS: "-Dmaven.repo.local=.cache/.m2/repository"  # Maven 本地仓库
+
+mvn_build_job:
+  image: harbor.linuxtian.com/library/jdk8-maven:latest
+  stage: package
+  tags:
+    - k8s-runner
+  script:
+    - mkdir -p .cache/.m2/repository # maven 依赖
+    - |
+      if [[ "$CI_COMMIT_BRANCH" =~ ^dev-.* ]]; then
+        PROFILE=dev
+      elif [[ "$CI_COMMIT_BRANCH" == "main" ]]; then
+        PROFILE=prod
+      fi
+    - mvn -B clean install -P${PROFILE} -Dmaven.test.skip=true
+    - JAR_NAME=$(find target -maxdepth 1 -name "*.jar" ! -name "*-sources.jar" ! -name "*-javadoc.jar" ! -name "original-*" | head -n 1) # 动态获取 JAR 文件名
+    - mkdir -p .cache/jar  # 确保缓存目录存在
+    - cp $JAR_NAME .cache/jar/
+  cache:
+    key: "$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cache/.m2/repository  # Maven 依赖缓存路径
+      - .cache/jar  # 缓存 JAR 文件
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^dev-.*/'
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH == "main"'  # 只在 main 分支上触发
+      when: on_success
+
+
+docker_build_job:
+  image: harbor.linuxtian.com/library/docker:20.10.10
+  stage: docker_build
+  tags:
+    - k8s-runner
+  script:
+    - mkdir -p .cache/jar  # 确保缓存目录存在
+    - JAR_NAME=$(ls .cache/jar/*.jar | head -n 1)  # 从缓存中动态获取 JAR 文件名
+    - mkdir -pv target
+    - cp $JAR_NAME target/  # 复制 JAR 文件
+    - mkdir ~/.docker/
+    - echo "$DOCKER_AUTH_CONFIG" | base64 -d > ~/.docker/config.json
+    - cat ~/.docker/config.json
+    - TAG_NAME="${CI_COMMIT_REF_NAME}-$(date +%Y%m%d%H%M)-${CI_COMMIT_SHORT_SHA}-${CI_PIPELINE_ID}"
+    - echo $TAG_NAME > .cache/tag_name.txt  # 将 TAG_NAME 写入文件
+    - |
+      if [[ "$CI_COMMIT_BRANCH" =~ ^dev-.* ]]; then
+        PROFILE=dev
+      elif [[ "$CI_COMMIT_BRANCH" == "main" ]]; then
+        PROFILE=prod
+      fi
+    - docker build --build-arg PROFILE=$PROFILE -t harbor.linuxtian.com/k8s-app/helloworld:$TAG_NAME .
+    - docker push harbor.linuxtian.com/k8s-app/helloworld:$TAG_NAME
+  cache:
+    key: "$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cache/jar  # 确保 JAR 文件在构建阶段可用
+      - .cache/tag_name.txt     # 拉取镜像tag文件
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^dev-.*/'
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH == "main"'  # 只在 main 分支上触发
+      when: on_success
+
+deploy_k8s_job:
+  image: harbor.linuxtian.com/library/kubectl:v1.23.0
+  stage: deploy_k8s
+  tags:
+    - k8s-runner
+  cache:
+    key: "$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cache/tag_name.txt
+  script:
+    - mkdir -pv ~/.kube/
+    - mkdir -pv .cache
+    - ls -lh
+    - cat .cache/tag_name.txt  # 从缓存中读取变量
+    - TAG_NAME=$(cat .cache/tag_name.txt)
+    - |
+      if [[ "$CI_COMMIT_BRANCH" =~ ^dev-.* ]]; then
+        echo '部署服务到开发环境'
+        PROFILE=dev
+        echo "$TEST_KUBE_CONFIG" | base64 -d > ~/.kube/config
+        echo '11.0.1.20 apiserver.cluster.local' >> /etc/hosts
+        sed -i "s/TAG_NAME/$TAG_NAME/g" k8s/deployment.yaml
+        sed -i "s/deploy_env/$PROFILE/g" k8s/deployment.yaml
+        echo '打印输出测试环境客户端证书文件'
+        cat ~/.kube/config
+        cat /etc/hosts
+        cat k8s/deployment.yaml
+        kubectl apply -f k8s/deployment.yaml
+      elif [[ '$CI_COMMIT_BRANCH == "main"' ]]; then
+        echo '部署服务到生产环境'
+        PROFILE=prod
+        echo "$PROD_KUBE_CONFIG" | base64 -d > ~/.kube/config
+        echo '11.0.1.20 apiserver.cluster.local' >> /etc/hosts
+        sed -i "s/TAG_NAME/$TAG_NAME/g" k8s/deployment.yaml
+        sed -i "s/deploy_env/$PROFILE/g" k8s/deployment.yaml
+        echo '打印输出生产环境客户端证书文件'
+        cat ~/.kube/config
+        cat /etc/hosts
+        cat k8s/deployment.yaml
+        kubectl apply -f k8s/
+      fi
+
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^dev-.*/'  # 只在 test-xxxx 分支上触发
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH == "main"'  # 只在 main 分支上触发
+      when: manual  # 手动触发 main 部署
