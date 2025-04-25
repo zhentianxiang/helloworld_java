@@ -1,28 +1,28 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: helloworld
+  name: helloworld-java
   namespace: k8s-app
 spec:
   replicas: 1
   selector:
     matchLabels:
-      k8s-app: helloworld
+      k8s-app: helloworld-java
   template:
     metadata:
       labels:
-        k8s-app: helloworld
+        k8s-app: helloworld-java
         logging: "true"
     spec:
       imagePullSecrets:
         - name: harbor-registry-secret
       containers:
-        - name: helloworld
-          image: harbor.linuxtian.com/k8s-app/helloworld:TAG_NAME
+        - name: helloworld-java
+          image: harbor.linuxtian.com/k8s-app/helloworld-java:TAG_NAME
           imagePullPolicy: Always
           env:
             - name: JAVA_OPTS
-              value: "-Xms512m -Xmx2048m -Xmn256m -XX:+UseG1GC -Dspring.profiles.active=deploy_env"
+              value: "-Xms512m -Xmx2048m -Xmn256m -XX:+UseG1GC -Dspring.profiles.active=PROFILE"
             - name: LANG
               value: "zh_CN.UTF-8"
             - name: TZ
@@ -38,7 +38,7 @@ spec:
               memory: 512Mi
           livenessProbe:
             httpGet:
-              path: /
+              path: /health
               port: 8080
               scheme: HTTP
             initialDelaySeconds: 60
@@ -48,7 +48,7 @@ spec:
             timeoutSeconds: 10
           readinessProbe:
             httpGet:
-              path: /
+              path: /health
               port: 8080
               scheme: HTTP
             initialDelaySeconds: 60
@@ -59,13 +59,14 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: helloworld
-  namespace: default
+  name: helloworld-java
+  namespace: k8s-app
 spec:
   ports:
     - port: 8080
       targetPort: 8080
-      name: helloworld
+      name: helloworld-java
+      nodePort: 31234
   selector:
-    k8s-app: helloworld
+    k8s-app: helloworld-java
   type: NodePort

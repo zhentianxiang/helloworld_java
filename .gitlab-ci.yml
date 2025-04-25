@@ -4,30 +4,46 @@ stages:
   - deploy_k8s
 
 variables:
-  MAVEN_OPTS: "-Dmaven.repo.local=.cache/.m2/repository"  # Maven 本地仓库
+  MAVEN_OPTS: "-Dmaven.repo.local=.cache/maven"      # Maven 缓存
+
+# 全局缓存配置（所有 job 继承）
+cache:
+  key: ${CI_COMMIT_REF_SLUG}
+  paths:
+    - .cache   # 全局缓存 .cache 目录
+  policy: pull-push
 
 mvn_build_job:
-  image: harbor.linuxtian.com/library/jdk8-maven:latest
+  image: harbor.linuxtian.com/library/jdk-maven-nexus:latest
   stage: package
   tags:
     - k8s-runner
   script:
-    - mkdir -p .cache/.m2/repository # maven 依赖
+    # 确保缓存目录存在
+    - mkdir -p .cache/maven
+
+    # 动态构建模式
     - |
       if [[ "$CI_COMMIT_BRANCH" =~ ^dev-.* ]]; then
         PROFILE=dev
       elif [[ "$CI_COMMIT_BRANCH" == "main" ]]; then
         PROFILE=prod
       fi
-    - mvn -B clean install -P${PROFILE} -Dmaven.test.skip=true
-    - JAR_NAME=$(find target -maxdepth 1 -name "*.jar" ! -name "*-sources.jar" ! -name "*-javadoc.jar" ! -name "original-*" | head -n 1) # 动态获取 JAR 文件名
-    - mkdir -p .cache/jar  # 确保缓存目录存在
-    - cp $JAR_NAME .cache/jar/
-  cache:
-    key: "$CI_COMMIT_REF_SLUG"
-    paths:
-      - .cache/.m2/repository  # Maven 依赖缓存路径
-      - .cache/jar  # 缓存 JAR 文件
+
+    # maven 构建并指定缓存目录
+    - mvn -B clean install -P${PROFILE} -Dmaven.test.skip=true -Dmaven.repo.local=.cache/maven
+
+    # 动态获取 JAR 二进制文件名
+    - JAR_NAME=$(find target -maxdepth 1 -name "*.jar" ! -name "*-sources.jar" ! -name "*-javadoc.jar" ! -name "original-*" | head -n 1)
+
+    # 创建缓存 JAR 二进制文件目录
+    - mkdir -p .cache/maven/jar
+    - cp $JAR_NAME .cache/maven/jar
+
+    # 验证缓存是否成
+    - ls -lah .cache/maven
+    - ls -lah .cache/maven/jar
+
   rules:
     - if: '$CI_COMMIT_BRANCH =~ /^dev-.*/'
       when: on_success
@@ -41,28 +57,37 @@ docker_build_job:
   tags:
     - k8s-runner
   script:
-    - mkdir -p .cache/jar  # 确保缓存目录存在
-    - JAR_NAME=$(ls .cache/jar/*.jar | head -n 1)  # 从缓存中动态获取 JAR 文件名
+    # 验证上个阶段的构建产物是否在本阶段存在
+    - ls -lah .cache/maven/jar
+
+    # 从缓存中动态获取 JAR 文件名
+    - JAR_NAME=$(ls .cache/maven/jar/*.jar | head -n 1)
+
+    # 复制 JAR 文件到项目根目录 target 目录中以备 Dockerfile 使用
     - mkdir -pv target
-    - cp $JAR_NAME target/  # 复制 JAR 文件
+    - cp $JAR_NAME target/
+
+    # 准备Docker认证
     - mkdir ~/.docker/
     - echo "$DOCKER_AUTH_CONFIG" | base64 -d > ~/.docker/config.json
-    - cat ~/.docker/config.json
+
+    # 生成镜像标签
     - TAG_NAME="${CI_COMMIT_REF_NAME}-$(date +%Y%m%d%H%M)-${CI_COMMIT_SHORT_SHA}-${CI_PIPELINE_ID}"
-    - echo $TAG_NAME > .cache/tag_name.txt  # 将 TAG_NAME 写入文件
+
+    # 将 TAG_NAME 写入文件传递给 deploy_k8s_job 使用
+    - echo "TAG_NAME=$TAG_NAME" > .cache/maven/.tag_name.env
+
+    # 动态构建模式
     - |
       if [[ "$CI_COMMIT_BRANCH" =~ ^dev-.* ]]; then
         PROFILE=dev
       elif [[ "$CI_COMMIT_BRANCH" == "main" ]]; then
         PROFILE=prod
       fi
-    - docker build --build-arg PROFILE=$PROFILE -t harbor.linuxtian.com/k8s-app/helloworld:$TAG_NAME .
-    - docker push harbor.linuxtian.com/k8s-app/helloworld:$TAG_NAME
-  cache:
-    key: "$CI_COMMIT_REF_SLUG"
-    paths:
-      - .cache/jar  # 确保 JAR 文件在构建阶段可用
-      - .cache/tag_name.txt     # 拉取镜像tag文件
+
+    - docker build --build-arg PROFILE=$PROFILE -t harbor.linuxtian.com/k8s-app/helloworld-java:$TAG_NAME .
+    - docker push harbor.linuxtian.com/k8s-app/helloworld-java:$TAG_NAME
+
   rules:
     - if: '$CI_COMMIT_BRANCH =~ /^dev-.*/'
       when: on_success
@@ -74,16 +99,12 @@ deploy_k8s_job:
   stage: deploy_k8s
   tags:
     - k8s-runner
-  cache:
-    key: "$CI_COMMIT_REF_SLUG"
-    paths:
-      - .cache/tag_name.txt
   script:
     - mkdir -pv ~/.kube/
-    - mkdir -pv .cache
     - ls -lh
-    - cat .cache/tag_name.txt  # 从缓存中读取变量
-    - TAG_NAME=$(cat .cache/tag_name.txt)
+
+    # 加载缓存中的 IMAGE TAG 变量
+    - source .cache/maven/.tag_name.env
     - |
       if [[ "$CI_COMMIT_BRANCH" =~ ^dev-.* ]]; then
         echo '部署服务到开发环境'
@@ -91,7 +112,7 @@ deploy_k8s_job:
         echo "$TEST_KUBE_CONFIG" | base64 -d > ~/.kube/config
         echo '11.0.1.20 apiserver.cluster.local' >> /etc/hosts
         sed -i "s/TAG_NAME/$TAG_NAME/g" k8s/deployment.yaml
-        sed -i "s/deploy_env/$PROFILE/g" k8s/deployment.yaml
+        sed -i "s/PROFILE/$PROFILE/g" k8s/deployment.yaml
         echo '打印输出测试环境客户端证书文件'
         cat ~/.kube/config
         cat /etc/hosts
@@ -103,7 +124,7 @@ deploy_k8s_job:
         echo "$PROD_KUBE_CONFIG" | base64 -d > ~/.kube/config
         echo '11.0.1.20 apiserver.cluster.local' >> /etc/hosts
         sed -i "s/TAG_NAME/$TAG_NAME/g" k8s/deployment.yaml
-        sed -i "s/deploy_env/$PROFILE/g" k8s/deployment.yaml
+        sed -i "s/PROFILE/$PROFILE/g" k8s/deployment.yaml
         echo '打印输出生产环境客户端证书文件'
         cat ~/.kube/config
         cat /etc/hosts
